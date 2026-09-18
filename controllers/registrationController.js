@@ -3,28 +3,49 @@ const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
 const nodemailer = require("nodemailer");
 
+// =====================================================
+// SMTP CONFIGURATION
+// =====================================================
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp.hostinger.com",
   port: Number(process.env.SMTP_PORT) || 465,
   secure: true,
+
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+
+  // Prevent SMTP from hanging forever
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
 });
 
-transporter.verify((error) => {
-  if (error) {
-    console.error("❌ SMTP connection failed:", error);
-  } else {
-    console.log("✅ SMTP server ready");
-  }
-});
+// =====================================================
+// EMAIL VALIDATION
+// =====================================================
 
 const isValidEmail = (email) => {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 };
 
+// =====================================================
+// SMTP TEST
+// =====================================================
+
+transporter.verify((error) => {
+  if (error) {
+    console.error("❌ SMTP connection failed:", error.message);
+  } else {
+    console.log("✅ SMTP server ready");
+  }
+});
+
+// =====================================================
+// CREATE REGISTRATION
+// =====================================================
 
 exports.createRegistration = async (req, res) => {
   try {
@@ -40,9 +61,9 @@ exports.createRegistration = async (req, res) => {
       program,
     } = req.body;
 
-    // -----------------------------
+    // =================================================
     // VALIDATION
-    // -----------------------------
+    // =================================================
 
     if (
       !firstName ||
@@ -61,6 +82,10 @@ exports.createRegistration = async (req, res) => {
       });
     }
 
+    // =================================================
+    // NORMALIZE EMAIL
+    // =================================================
+
     const normalizedEmail = email.trim().toLowerCase();
 
     if (!isValidEmail(normalizedEmail)) {
@@ -70,9 +95,9 @@ exports.createRegistration = async (req, res) => {
       });
     }
 
-    // -----------------------------
+    // =================================================
     // CHECK DUPLICATE EMAIL
-    // -----------------------------
+    // =================================================
 
     const existing = await Registration.findOne({
       email: normalizedEmail,
@@ -85,9 +110,9 @@ exports.createRegistration = async (req, res) => {
       });
     }
 
-    // -----------------------------
+    // =================================================
     // CREATE REGISTRATION
-    // -----------------------------
+    // =================================================
 
     const registrationId = uuidv4();
 
@@ -101,10 +126,9 @@ exports.createRegistration = async (req, res) => {
       `✅ Registration saved: ${registrationId} - ${normalizedEmail}`
     );
 
-    // =====================================================
-    // IMPORTANT:
+    // =================================================
     // SEND SUCCESS RESPONSE IMMEDIATELY
-    // =====================================================
+    // =================================================
 
     res.status(201).json({
       success: true,
@@ -113,101 +137,145 @@ exports.createRegistration = async (req, res) => {
       data: registration,
     });
 
-    // =====================================================
-    // EMAIL PROCESSING HAPPENS AFTER RESPONSE
-    // =====================================================
+    // =================================================
+    // EMAIL + QR CODE RUN IN BACKGROUND
+    // =================================================
+    //
+    // This is deliberately NOT awaited.
+    //
+    // The browser already received the successful
+    // registration response above.
+    //
+    // =================================================
 
-    try {
-      const qrPayload = JSON.stringify({
-        registrationId,
-        firstName: registration.firstName,
-        lastName: registration.lastName,
-        email: registration.email,
-        program: registration.program,
-      });
+    setImmediate(async () => {
+      try {
+        console.log(
+          `📧 Starting confirmation email for ${normalizedEmail}`
+        );
 
-      const qrBuffer = await QRCode.toBuffer(qrPayload);
+        // ---------------------------------------------
+        // CREATE QR CODE
+        // ---------------------------------------------
 
-      await transporter.sendMail({
-        from: `"${process.env.MAIL_FROM_NAME || "Study in Mauritius"}" <${process.env.SMTP_USER}>`,
-        to: registration.email,
-        subject: "Registration Confirmed – Study in Mauritius Fair",
+        const qrPayload = JSON.stringify({
+          registrationId,
+          firstName: registration.firstName,
+          lastName: registration.lastName,
+          email: registration.email,
+          program: registration.program,
+        });
 
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto;">
+        const qrBuffer = await QRCode.toBuffer(qrPayload);
 
-            <h2 style="color:#0b5ed7;">
-              Registration Confirmed
-            </h2>
+        console.log("✅ QR code generated");
 
-            <p>
-              Dear ${registration.firstName} ${registration.lastName},
-            </p>
+        // ---------------------------------------------
+        // SEND EMAIL
+        // ---------------------------------------------
 
-            <p>
-              Your registration for the
-              <strong>Study in Mauritius Higher Education Fair</strong>
-              has been successfully received.
-            </p>
+        await transporter.sendMail({
+          from: `"${process.env.MAIL_FROM_NAME || "Study in Mauritius"}" <${process.env.SMTP_USER}>`,
 
-            <p>
-              <strong>Registration ID:</strong><br>
-              ${registrationId}
-            </p>
+          to: registration.email,
 
-            <p>
-              <strong>Programme:</strong><br>
-              ${registration.program}
-            </p>
+          subject:
+            "Registration Confirmed – Study in Mauritius Fair",
 
-            <p>
-              Please keep this email and your QR code for
-              registration/check-in at the event.
-            </p>
+          html: `
+            <div
+              style="
+                font-family: Arial, sans-serif;
+                max-width: 600px;
+                margin: auto;
+                padding: 20px;
+              "
+            >
 
-            <div style="text-align:center; margin:30px 0;">
-              <img
-                src="cid:registrationqr"
-                alt="Registration QR Code"
-                style="width:200px;height:200px;"
-              />
+              <h2 style="color:#0b5ed7;">
+                Registration Confirmed
+              </h2>
+
+              <p>
+                Dear ${registration.firstName} ${registration.lastName},
+              </p>
+
+              <p>
+                Your registration for the
+                <strong>
+                  Study in Mauritius Higher Education Fair
+                </strong>
+                has been successfully received.
+              </p>
+
+              <p>
+                <strong>Registration ID:</strong><br>
+                ${registrationId}
+              </p>
+
+              <p>
+                <strong>Programme:</strong><br>
+                ${registration.program}
+              </p>
+
+              <p>
+                Please keep this email and your QR code for
+                registration/check-in at the event.
+              </p>
+
+              <div
+                style="
+                  text-align:center;
+                  margin:30px 0;
+                "
+              >
+                <img
+                  src="cid:registrationqr"
+                  alt="Registration QR Code"
+                  style="
+                    width:200px;
+                    height:200px;
+                  "
+                />
+              </div>
+
+              <p>
+                We look forward to seeing you at the event.
+              </p>
+
+              <p>
+                Regards,<br>
+                <strong>Study in Mauritius Team</strong>
+              </p>
+
             </div>
+          `,
 
-            <p>
-              We look forward to seeing you at the event.
-            </p>
+          attachments: [
+            {
+              filename: "registration-qr.png",
+              content: qrBuffer,
+              cid: "registrationqr",
+            },
+          ],
+        });
 
-            <p>
-              Regards,<br>
-              <strong>Study in Mauritius Team</strong>
-            </p>
+        console.log(
+          `📧 Confirmation email sent to ${normalizedEmail}`
+        );
 
-          </div>
-        `,
+      } catch (emailError) {
+        console.error(
+          `⚠️ Registration saved, but confirmation email failed for ${normalizedEmail}`
+        );
 
-        attachments: [
-          {
-            filename: "registration-qr.png",
-            content: qrBuffer,
-            cid: "registrationqr",
-          },
-        ],
-      });
+        console.error(emailError.message);
+      }
+    });
 
-      console.log(
-        `📧 Confirmation email sent to ${registration.email}`
-      );
-
-    } catch (emailError) {
-      console.error(
-        `⚠️ Registration saved but email failed for ${registration.email}:`,
-        emailError
-      );
-    }
   } catch (error) {
     console.error("❌ Registration Error:", error);
 
-    // Only send a response if one has not already been sent
     if (!res.headersSent) {
       return res.status(500).json({
         success: false,
