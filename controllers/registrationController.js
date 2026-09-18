@@ -1,41 +1,19 @@
-// controllers/registrationController.js
-
 const Registration = require("../models/Registration");
 const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
 // =====================================================
-// EMAIL TRANSPORTER
+// RESEND EMAIL CONFIGURATION
 // =====================================================
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.hostinger.com",
-  port: Number(process.env.SMTP_PORT) || 465,
-  secure: process.env.SMTP_SECURE
-    ? process.env.SMTP_SECURE === "true"
-    : true,
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+const FROM_EMAIL =
+  process.env.MAIL_FROM_EMAIL || "onboarding@resend.dev";
 
-  // Prevent email connection problems from hanging requests
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-});
-
-// Check SMTP in the background.
-// This DOES NOT block server startup.
-transporter.verify((error) => {
-  if (error) {
-    console.error("❌ SMTP connection failed:", error.message);
-  } else {
-    console.log("✅ SMTP server ready");
-  }
-});
+const FROM_NAME =
+  process.env.MAIL_FROM_NAME || "Study in Mauritius";
 
 // =====================================================
 // EMAIL VALIDATION
@@ -46,15 +24,58 @@ const isValidEmail = (email) => {
 };
 
 // =====================================================
+// SEND EMAIL USING RESEND
+// =====================================================
+
+const sendEmail = async ({
+  to,
+  subject,
+  html,
+  attachments = [],
+}) => {
+  try {
+    const result = await resend.emails.send({
+      from: `${FROM_NAME} <${FROM_EMAIL}>`,
+      to: [to],
+      subject,
+      html,
+      attachments,
+    });
+
+    if (result.error) {
+      console.error("❌ Resend email error:", result.error);
+      return {
+        success: false,
+        error: result.error,
+      };
+    }
+
+    console.log("✅ Email sent successfully:", result.data);
+
+    return {
+      success: true,
+      data: result.data,
+    };
+  } catch (error) {
+    console.error("❌ Resend exception:", error);
+
+    return {
+      success: false,
+      error,
+    };
+  }
+};
+
+// =====================================================
 // CREATE REGISTRATION
 // =====================================================
 
-exports.createRegistration = async (req, res) => {
-  try {
-    console.log("======================================");
-    console.log("🚀 NEW REGISTRATION REQUEST");
-    console.log("======================================");
+const createRegistration = async (req, res) => {
+  console.log("\n======================================");
+  console.log("REGISTRATION REQUEST");
+  console.log("======================================");
 
+  try {
     const {
       firstName,
       lastName,
@@ -68,7 +89,7 @@ exports.createRegistration = async (req, res) => {
     } = req.body;
 
     // -------------------------------------------------
-    // Validate required fields
+    // VALIDATION
     // -------------------------------------------------
 
     if (
@@ -82,17 +103,11 @@ exports.createRegistration = async (req, res) => {
       !gender ||
       !program
     ) {
-      console.log("❌ Missing required registration fields");
-
       return res.status(400).json({
         success: false,
         message: "Please complete all required fields.",
       });
     }
-
-    // -------------------------------------------------
-    // Normalize email
-    // -------------------------------------------------
 
     const normalizedEmail = email.trim().toLowerCase();
 
@@ -104,7 +119,7 @@ exports.createRegistration = async (req, res) => {
     }
 
     // -------------------------------------------------
-    // Check duplicate email
+    // CHECK DUPLICATE EMAIL
     // -------------------------------------------------
 
     const existing = await Registration.findOne({
@@ -112,10 +127,6 @@ exports.createRegistration = async (req, res) => {
     });
 
     if (existing) {
-      console.log(
-        `⚠️ Duplicate registration attempt: ${normalizedEmail}`
-      );
-
       return res.status(409).json({
         success: false,
         message: "This email is already registered.",
@@ -123,7 +134,7 @@ exports.createRegistration = async (req, res) => {
     }
 
     // -------------------------------------------------
-    // Create unique registration ID
+    // CREATE UNIQUE REGISTRATION ID
     // -------------------------------------------------
 
     const registrationId = uuidv4();
@@ -133,6 +144,7 @@ exports.createRegistration = async (req, res) => {
     // -------------------------------------------------
 
     const registration = await Registration.create({
+      registrationId,
       firstName: firstName.trim(),
       lastName: lastName.trim(),
       email: normalizedEmail,
@@ -142,265 +154,301 @@ exports.createRegistration = async (req, res) => {
       phone: phone.trim(),
       gender,
       program,
-      registrationId,
     });
 
     console.log(
-      `✅ Registration saved successfully: ${registrationId}`
+      "✅ Registration saved successfully:",
+      registrationId
     );
 
-    // =================================================
-    // IMPORTANT:
-    // SEND RESPONSE IMMEDIATELY
-    // =================================================
+    // -------------------------------------------------
+    // RESPOND IMMEDIATELY
+    // -------------------------------------------------
 
     res.status(201).json({
       success: true,
-
       message:
-        "Registration successful. Your registration has been received.",
-
+        "Registration successful. Your confirmation email will be sent shortly.",
       emailSent: false,
-
       data: registration,
     });
 
     // =================================================
     // BACKGROUND QR + EMAIL
     // =================================================
-    //
-    // This runs AFTER the HTTP response has been sent.
-    // Therefore a slow SMTP server cannot cause the
-    // frontend registration request to timeout.
-    //
-    // =================================================
 
     setImmediate(async () => {
       try {
         console.log(
-          `📧 Starting background confirmation for ${normalizedEmail}`
+          "📧 Starting background confirmation for:",
+          normalizedEmail
         );
 
-        // -------------------------------------------------
-        // QR CODE DATA
-        // -------------------------------------------------
+        // ---------------------------------------------
+        // GENERATE QR CODE
+        // ---------------------------------------------
 
-        const qrPayload = JSON.stringify({
+        const qrData = JSON.stringify({
           registrationId,
-          firstName,
-          lastName,
+          name: `${firstName} ${lastName}`,
           email: normalizedEmail,
           program,
-          event: "Study in Mauritius Higher Education Fair",
         });
 
-        // -------------------------------------------------
-        // Generate QR code
-        // -------------------------------------------------
-
-        const qrBuffer = await QRCode.toBuffer(qrPayload, {
+        const qrBuffer = await QRCode.toBuffer(qrData, {
           type: "png",
           width: 500,
           margin: 2,
+          errorCorrectionLevel: "H",
         });
 
         console.log("✅ QR code generated");
 
-        // -------------------------------------------------
-        // Confirmation email
-        // -------------------------------------------------
+        // ---------------------------------------------
+        // EMAIL HTML
+        // ---------------------------------------------
 
-        const fromEmail =
-          process.env.SMTP_FROM ||
-          process.env.SMTP_USER;
+        const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
 
-        const mailOptions = {
-          from: `"Study in Mauritius" <${fromEmail}>`,
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #f4f6f8;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #333333;
+    }
+
+    .container {
+      max-width: 650px;
+      margin: 30px auto;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 3px 15px rgba(0,0,0,0.08);
+    }
+
+    .header {
+      background: #0b4f71;
+      color: #ffffff;
+      padding: 30px;
+      text-align: center;
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 26px;
+    }
+
+    .header p {
+      margin: 8px 0 0;
+      font-size: 15px;
+    }
+
+    .content {
+      padding: 30px;
+    }
+
+    .success {
+      background: #eaf7ee;
+      border: 1px solid #b9e2c5;
+      color: #216b35;
+      padding: 15px;
+      border-radius: 8px;
+      margin-bottom: 25px;
+    }
+
+    .details {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+
+    .details td {
+      padding: 12px 8px;
+      border-bottom: 1px solid #eeeeee;
+    }
+
+    .label {
+      font-weight: bold;
+      width: 40%;
+    }
+
+    .qr {
+      text-align: center;
+      margin-top: 30px;
+      padding-top: 25px;
+      border-top: 1px solid #eeeeee;
+    }
+
+    .footer {
+      background: #f7f7f7;
+      padding: 20px;
+      text-align: center;
+      font-size: 13px;
+      color: #777777;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container">
+
+    <div class="header">
+      <h1>Study in Mauritius</h1>
+      <p>Higher Education Fair</p>
+    </div>
+
+    <div class="content">
+
+      <div class="success">
+        <strong>Registration Successful!</strong><br />
+        Your registration for the Study in Mauritius Higher Education Fair
+        has been successfully received.
+      </div>
+
+      <p>
+        Dear <strong>${firstName} ${lastName}</strong>,
+      </p>
+
+      <p>
+        Thank you for registering for the Study in Mauritius Higher Education Fair.
+        Please keep this email for your records.
+      </p>
+
+      <table class="details">
+
+        <tr>
+          <td class="label">Registration ID</td>
+          <td>${registrationId}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Name</td>
+          <td>${firstName} ${lastName}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Email</td>
+          <td>${normalizedEmail}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Phone</td>
+          <td>${phone}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Country</td>
+          <td>${country}</td>
+        </tr>
+
+        <tr>
+          <td class="label">City</td>
+          <td>${city}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Residence</td>
+          <td>${residence}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Gender</td>
+          <td>${gender}</td>
+        </tr>
+
+        <tr>
+          <td class="label">Program</td>
+          <td>${program}</td>
+        </tr>
+
+      </table>
+
+      <div class="qr">
+
+        <h3>Your Registration QR Code</h3>
+
+        <p>
+          Please keep the attached QR code. It may be used
+          for registration verification at the event.
+        </p>
+
+        <p>
+          <strong>Your QR code is attached to this email.</strong>
+        </p>
+
+      </div>
+
+      <p>
+        We look forward to seeing you at the Study in Mauritius
+        Higher Education Fair.
+      </p>
+
+      <p>
+        Regards,<br />
+        <strong>Study in Mauritius Team</strong>
+      </p>
+
+    </div>
+
+    <div class="footer">
+      Study in Mauritius Higher Education Fair
+    </div>
+
+  </div>
+
+</body>
+</html>
+`;
+
+        // ---------------------------------------------
+        // SEND EMAIL THROUGH RESEND
+        // ---------------------------------------------
+
+        const emailResult = await sendEmail({
           to: normalizedEmail,
-
           subject:
             "Registration Confirmation - Study in Mauritius Higher Education Fair",
-
-          html: `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <meta charset="UTF-8">
-              <title>Registration Confirmation</title>
-            </head>
-
-            <body style="
-              margin:0;
-              padding:0;
-              background:#f4f7fb;
-              font-family:Arial,Helvetica,sans-serif;
-            ">
-
-              <div style="
-                max-width:650px;
-                margin:30px auto;
-                background:#ffffff;
-                border-radius:12px;
-                overflow:hidden;
-                box-shadow:0 4px 20px rgba(0,0,0,0.08);
-              ">
-
-                <div style="
-                  background:#0f3d91;
-                  padding:30px;
-                  text-align:center;
-                  color:white;
-                ">
-
-                  <h1 style="
-                    margin:0;
-                    font-size:28px;
-                  ">
-                    Registration Successful
-                  </h1>
-
-                  <p style="
-                    margin:10px 0 0;
-                    font-size:16px;
-                  ">
-                    Study in Mauritius Higher Education Fair
-                  </p>
-
-                </div>
-
-                <div style="padding:30px;">
-
-                  <p style="font-size:17px;">
-                    Dear <strong>${firstName} ${lastName}</strong>,
-                  </p>
-
-                  <p style="
-                    font-size:16px;
-                    line-height:1.6;
-                    color:#444;
-                  ">
-                    Thank you for registering for the
-                    <strong>
-                      Study in Mauritius Higher Education Fair
-                    </strong>.
-                  </p>
-
-                  <div style="
-                    background:#f5f7fa;
-                    border-radius:10px;
-                    padding:20px;
-                    margin:25px 0;
-                  ">
-
-                    <h3 style="
-                      margin-top:0;
-                      color:#0f3d91;
-                    ">
-                      Registration Details
-                    </h3>
-
-                    <p>
-                      <strong>Registration ID:</strong>
-                      ${registrationId}
-                    </p>
-
-                    <p>
-                      <strong>Program / Location:</strong>
-                      ${program}
-                    </p>
-
-                    <p>
-                      <strong>Name:</strong>
-                      ${firstName} ${lastName}
-                    </p>
-
-                    <p>
-                      <strong>Email:</strong>
-                      ${normalizedEmail}
-                    </p>
-
-                    <p>
-                      <strong>Phone:</strong>
-                      ${phone}
-                    </p>
-
-                  </div>
-
-                  <p style="
-                    font-size:16px;
-                    line-height:1.6;
-                    color:#444;
-                  ">
-                    Your registration has been successfully received.
-                    Please keep this email for your records.
-                  </p>
-
-                  <p style="
-                    font-size:16px;
-                    line-height:1.6;
-                    color:#444;
-                  ">
-                    Your registration QR code is attached to this email.
-                  </p>
-
-                  <div style="
-                    text-align:center;
-                    margin-top:30px;
-                  ">
-
-                    <p style="
-                      color:#777;
-                      font-size:14px;
-                    ">
-                      We look forward to seeing you at the event.
-                    </p>
-
-                  </div>
-
-                </div>
-
-                <div style="
-                  background:#f5f5f5;
-                  padding:20px;
-                  text-align:center;
-                  color:#777;
-                  font-size:13px;
-                ">
-
-                  Study in Mauritius Higher Education Fair
-
-                </div>
-
-              </div>
-
-            </body>
-            </html>
-          `,
-
+          html,
           attachments: [
             {
               filename: `registration-${registrationId}.png`,
-              content: qrBuffer,
-              contentType: "image/png",
-              cid: `registrationqr-${registrationId}`,
+              content: qrBuffer.toString("base64"),
             },
           ],
-        };
+        });
 
-        await transporter.sendMail(mailOptions);
+        if (emailResult.success) {
+          console.log(
+            "✅ Confirmation email sent to:",
+            normalizedEmail
+          );
 
-        console.log(
-          `✅ Confirmation email sent to ${normalizedEmail}`
-        );
+          console.log(
+            "📨 Resend email ID:",
+            emailResult.data?.id
+          );
+        } else {
+          console.error(
+            "❌ Confirmation email failed for:",
+            normalizedEmail
+          );
 
-      } catch (emailError) {
-        // IMPORTANT:
-        // Registration has already succeeded.
-        // Email failure must NOT affect the registration.
+          console.error(emailResult.error);
+        }
 
+      } catch (error) {
         console.error(
-          `❌ Background email/QR error for ${normalizedEmail}:`,
-          emailError.message
+          "❌ Background QR/email error for",
+          normalizedEmail,
+          ":",
+          error.message
         );
       }
     });
@@ -408,18 +456,9 @@ exports.createRegistration = async (req, res) => {
   } catch (error) {
     console.error("❌ Registration error:", error);
 
-    // Handle duplicate key errors from MongoDB
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: "This email is already registered.",
-      });
-    }
-
     return res.status(500).json({
       success: false,
-      message:
-        "Registration could not be completed. Please try again.",
+      message: "Registration could not be completed.",
       error:
         process.env.NODE_ENV === "production"
           ? undefined
@@ -431,20 +470,15 @@ exports.createRegistration = async (req, res) => {
 // =====================================================
 // GET ALL REGISTRATIONS
 // =====================================================
-// Used by the admin dashboard
-// GET /api/registrations
-// =====================================================
 
-exports.getAllRegistrations = async (req, res) => {
+const getAllRegistrations = async (req, res) => {
   try {
-    console.log("📋 Fetching all registrations...");
-
-    const registrations = await Registration.find({})
-      .sort({ createdAt: -1 });
+    const registrations = await Registration.find().sort({
+      createdAt: -1,
+    });
 
     return res.status(200).json({
       success: true,
-      count: registrations.length,
       data: registrations,
     });
 
@@ -456,11 +490,7 @@ exports.getAllRegistrations = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Unable to fetch registrations.",
-      error:
-        process.env.NODE_ENV === "production"
-          ? undefined
-          : error.message,
+      message: "Failed to fetch registrations.",
     });
   }
 };
@@ -468,28 +498,8 @@ exports.getAllRegistrations = async (req, res) => {
 // =====================================================
 // SEND BULK EMAIL
 // =====================================================
-// POST /api/registrations/send-bulk-email
-//
-// Expected body can contain:
-//
-// {
-//   "subject": "Important Update",
-//   "message": "Hello everyone..."
-// }
-//
-// By default, this sends to ALL registered email addresses.
-//
-// You can also optionally provide:
-//
-// {
-//   "subject": "...",
-//   "message": "...",
-//   "emails": ["one@email.com", "two@email.com"]
-// }
-//
-// =====================================================
 
-exports.sendBulkEmail = async (req, res) => {
+const sendBulkEmail = async (req, res) => {
   try {
     const {
       subject,
@@ -497,32 +507,24 @@ exports.sendBulkEmail = async (req, res) => {
       emails,
     } = req.body;
 
-    // -------------------------------------------------
-    // Validate subject/message
-    // -------------------------------------------------
-
     if (!subject || !message) {
       return res.status(400).json({
         success: false,
-        message: "Email subject and message are required.",
+        message: "Subject and message are required.",
       });
     }
 
     // -------------------------------------------------
-    // Determine recipients
+    // USE PROVIDED EMAILS OR ALL REGISTERED USERS
     // -------------------------------------------------
 
     let recipients = [];
 
-    // If specific emails were supplied
     if (Array.isArray(emails) && emails.length > 0) {
       recipients = emails
-        .filter((email) => isValidEmail(email))
+        .filter(Boolean)
         .map((email) => email.trim().toLowerCase());
-    }
-
-    // Otherwise get all registered users
-    if (recipients.length === 0) {
+    } else {
       const registrations = await Registration.find(
         {},
         { email: 1 }
@@ -530,17 +532,17 @@ exports.sendBulkEmail = async (req, res) => {
 
       recipients = registrations
         .map((registration) => registration.email)
-        .filter((email) => email && isValidEmail(email))
+        .filter(Boolean)
         .map((email) => email.trim().toLowerCase());
     }
 
-    // Remove duplicates
+    // Remove duplicate emails
     recipients = [...new Set(recipients)];
 
     if (recipients.length === 0) {
-      return res.status(404).json({
+      return res.status(400).json({
         success: false,
-        message: "No valid email recipients found.",
+        message: "No valid recipients found.",
       });
     }
 
@@ -549,111 +551,84 @@ exports.sendBulkEmail = async (req, res) => {
     );
 
     // -------------------------------------------------
-    // Respond immediately
+    // RESPOND IMMEDIATELY
     // -------------------------------------------------
 
     res.status(202).json({
       success: true,
-      message:
-        "Bulk email sending has started in the background.",
-      recipientCount: recipients.length,
+      message: `Bulk email started for ${recipients.length} recipients.`,
+      recipients: recipients.length,
     });
 
     // -------------------------------------------------
-    // Send emails in background
+    // SEND IN BACKGROUND
     // -------------------------------------------------
 
     setImmediate(async () => {
-      let sent = 0;
+      let successful = 0;
       let failed = 0;
-
-      console.log(
-        `📨 Starting bulk email process for ${recipients.length} recipients`
-      );
 
       for (const recipient of recipients) {
         try {
-          await transporter.sendMail({
-            from: `"Study in Mauritius" <${
-              process.env.SMTP_FROM || process.env.SMTP_USER
-            }>`,
+          const result = await sendEmail({
             to: recipient,
-            subject: subject,
-
+            subject,
             html: `
-              <!DOCTYPE html>
-              <html>
-              <head>
-                <meta charset="UTF-8">
-                <title>${subject}</title>
-              </head>
-
-              <body style="
-                margin:0;
-                padding:0;
-                background:#f4f7fb;
-                font-family:Arial,Helvetica,sans-serif;
+              <div style="
+                font-family: Arial, Helvetica, sans-serif;
+                max-width: 650px;
+                margin: 0 auto;
+                padding: 30px;
               ">
 
-                <div style="
-                  max-width:650px;
-                  margin:30px auto;
-                  background:white;
-                  padding:30px;
-                  border-radius:10px;
-                ">
+                <h2>Study in Mauritius</h2>
 
-                  <h2 style="color:#0f3d91;">
-                    ${subject}
-                  </h2>
-
-                  <div style="
-                    font-size:16px;
-                    line-height:1.7;
-                    color:#444;
-                  ">
-                    ${message}
-                  </div>
-
-                  <hr style="
-                    margin:30px 0;
-                    border:none;
-                    border-top:1px solid #eee;
-                  ">
-
-                  <p style="
-                    color:#777;
-                    font-size:13px;
-                  ">
-                    Study in Mauritius Higher Education Fair
-                  </p>
-
+                <div>
+                  ${message}
                 </div>
 
-              </body>
-              </html>
+                <br />
+
+                <p>
+                  Regards,<br />
+                  <strong>Study in Mauritius Team</strong>
+                </p>
+
+              </div>
             `,
           });
 
-          sent++;
+          if (result.success) {
+            successful++;
 
-          console.log(
-            `✅ Bulk email sent: ${recipient}`
-          );
+            console.log(
+              `✅ Bulk email sent to ${recipient}`
+            );
+          } else {
+            failed++;
+
+            console.error(
+              `❌ Bulk email failed for ${recipient}`
+            );
+          }
 
         } catch (error) {
           failed++;
 
           console.error(
-            `❌ Failed to send bulk email to ${recipient}:`,
+            `❌ Bulk email exception for ${recipient}:`,
             error.message
           );
         }
       }
 
-      console.log(
-        `📊 Bulk email completed. Sent: ${sent}, Failed: ${failed}`
-      );
+      console.log("\n======================================");
+      console.log("BULK EMAIL COMPLETED");
+      console.log("======================================");
+      console.log("Total:", recipients.length);
+      console.log("Successful:", successful);
+      console.log("Failed:", failed);
+      console.log("======================================\n");
     });
 
   } catch (error) {
@@ -662,16 +637,19 @@ exports.sendBulkEmail = async (req, res) => {
       error
     );
 
-    // Only send a response if we haven't already sent one
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: "Unable to start bulk email process.",
-        error:
-          process.env.NODE_ENV === "production"
-            ? undefined
-            : error.message,
-      });
-    }
+    return res.status(500).json({
+      success: false,
+      message: "Failed to start bulk email.",
+    });
   }
+};
+
+// =====================================================
+// EXPORT CONTROLLERS
+// =====================================================
+
+module.exports = {
+  createRegistration,
+  getAllRegistrations,
+  sendBulkEmail,
 };
